@@ -5,12 +5,28 @@
 // Todo
 // - Check that mysql command exists
 const inquirer = require("inquirer");
+const { execSync } = require("child_process");
+
+// Init inquirer.
 inquirer.registerPrompt(
   "autocomplete",
   require("inquirer-autocomplete-prompt")
 );
+
+// Import job configuration.
 const projects = require("./projects.js").projects;
 
+// Job configuration.
+// This object will be filled based on user input.
+const jobConfig = {
+  project: "",
+  source: "",
+  destination: ""
+};
+
+/**
+ * Filtering function to filter out projects matching input.
+ */
 function searchProject(projects, answers, input) {
   input = input || "";
   return new Promise(function(resolve) {
@@ -28,10 +44,53 @@ function searchProject(projects, answers, input) {
   });
 }
 
-function databasePull() {
-  "ssh root@ipaddress \"mysqldump -u dbuser -p dbname\" > dblocal.sql";
+function doSync() {
+  databasePullSSH();
+  databasePushMySQL();
+  databaseReplaceMySQL();
 }
 
+function databasePullSSH() {
+  console.log(`Pull database from ${jobConfig.project}:${jobConfig.source}`);
+  const e = projects[jobConfig.project][jobConfig.source];
+  let cmd = `ssh ${e.sshUsername}@${e.sshHost} -o StrictHostKeyChecking=no -p ${e.sshPort} "mysqldump -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName}" > ./tmp/dump.sql`;
+  let stdout = execSync(cmd);
+  // console.log(stdout.toString());
+}
+
+function databasePushMySQL() {
+  console.log(`Push database to ${jobConfig.project}:${jobConfig.destination}`);
+  const e = projects[jobConfig.project][jobConfig.destination];
+  let cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} < ./tmp/dump.sql`;
+  let stdout = execSync(cmd);
+  // console.log(stdout.toString());
+}
+
+function databaseReplaceMySQL() {
+  console.log("Replace domains.");
+  const eSource = projects[jobConfig.project][jobConfig.source];
+  const e = projects[jobConfig.project][jobConfig.destination];
+
+  let cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} -e "UPDATE ${e.dbPrefix}options SET option_value = replace(option_value, '${eSource.url}', '${e.url}') WHERE option_name = 'home' OR option_name = 'siteurl'"`;
+  let stdout = execSync(cmd);
+  // console.log(stdout.toString());
+
+  cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} -e "UPDATE ${e.dbPrefix}posts SET guid = replace(guid, '${eSource.url}', '${e.url}')"`;
+  stdout = execSync(cmd);
+  // console.log(stdout.toString());
+
+  cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} -e "UPDATE ${e.dbPrefix}posts SET post_content = replace(post_content, '${eSource.url}', '${e.url}')"`;
+  stdout = execSync(cmd);
+  // console.log(stdout.toString());
+
+  cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} -e "UPDATE ${e.dbPrefix}postmeta SET meta_value = replace(meta_value, '${eSource.url}', '${e.url}')"`;
+  stdout = execSync(cmd);
+  // console.log(stdout.toString());
+}
+
+/**
+ * The 1st UI step. Choose project.
+ */
 function promptProject() {
   inquirer
     .prompt([
@@ -49,12 +108,15 @@ function promptProject() {
     });
 }
 
+/**
+ * A second UI step. Ask for source environment.
+ */
 function promptSourceEnvironment() {
   inquirer
     .prompt([
       {
         type: "list",
-        name: "from",
+        name: "source",
         message: "Select source environment",
         choices: Object.keys(projects[jobConfig.project])
       }
@@ -65,6 +127,9 @@ function promptSourceEnvironment() {
     });
 }
 
+/**
+ * A third UI step. Ask for destination environment.
+ */
 function promptTargetEnvironment() {
   // Filter out source environment. Target can't be the same as source.
   const availableEnvironments = Object.keys(projects[jobConfig.project]).filter(
@@ -75,14 +140,15 @@ function promptTargetEnvironment() {
     .prompt([
       {
         type: "list",
-        name: "to",
-        message: "Select target environment",
+        name: "destination",
+        message: "Select destination environment",
         choices: availableEnvironments
       }
     ])
     .then(function(answers) {
       Object.assign(jobConfig, answers);
-      console.log(jobConfig);
+      // console.log(jobConfig);
+      doSync();
     });
 }
 
