@@ -61,6 +61,13 @@ function databasePullSSH() {
 function databasePushMySQL() {
   console.log(`Push database to ${jobConfig.project}:${jobConfig.destination}`);
   const e = projects[jobConfig.project][jobConfig.destination];
+
+  // Skip read only target.
+  if (e.readonly) {
+    console.log("Target is read only. Skip push.");
+    return false;
+  }
+
   let cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} < ./tmp/dump.sql`;
   let stdout = execSync(cmd);
   // console.log(stdout.toString());
@@ -70,6 +77,12 @@ function databaseReplaceMySQL() {
   console.log("Replace domains.");
   const eSource = projects[jobConfig.project][jobConfig.source];
   const e = projects[jobConfig.project][jobConfig.destination];
+
+  // Skip read only target.
+  if (e.readonly) {
+    console.log("Target is read only. Skip replacements.");
+    return false;
+  }
 
   let cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} -e "UPDATE ${e.dbPrefix}options SET option_value = replace(option_value, '${eSource.url}', '${e.url}') WHERE option_name = 'home' OR option_name = 'siteurl'"`;
   let stdout = execSync(cmd);
