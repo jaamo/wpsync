@@ -5,7 +5,8 @@
 // Todo
 // - Check that mysql command exists
 const inquirer = require("inquirer");
-const { execSync } = require("child_process");
+const { exec } = require("child_process");
+const execSync = require('child_process').execSync;
 
 // Init inquirer.
 inquirer.registerPrompt(
@@ -13,21 +14,13 @@ inquirer.registerPrompt(
   require("inquirer-autocomplete-prompt")
 );
 
-// Import job configuration.
+// Import projects.
 const projects = require("./projects.js").projects;
-
-// Job configuration.
-// This object will be filled based on user input.
-const jobConfig = {
-  project: "",
-  source: "",
-  destination: ""
-};
 
 /**
  * Filtering function to filter out projects matching input.
  */
-function searchProject(projects, answers, input) {
+const searchProject = (projects, answers, input) => {
   input = input || "";
   return new Promise(function(resolve) {
     setTimeout(function() {
@@ -44,61 +37,109 @@ function searchProject(projects, answers, input) {
   });
 }
 
-function doSync() {
-  databasePullSSH();
-  databasePushMySQL();
-  databaseReplaceMySQL();
+
+/**
+ * Checks if ssh connection settings are enabled for remote.
+ * If they are, use SSH tunnel for pulling database.
+ */
+const useSSH = project =>
+    typeof(project.remote) !== "undefined" && typeof(project.remote.sshHost) !== "undefined";
+
+
+
+/**
+ * Run all steps importing database.
+ */
+const doPull = project => {
+
+    // Pull via SSH tunnel.
+    if (useSSH(project)) {
+        databasePullSSH(project);
+    }
+    // Pull directly from host
+    else {
+        databasePull(project);
+    }
+
+    databasePushMySQL(project);
+    databaseReplaceMySQL(project).then(() => {
+        console.log("Replaced");
+    }).catch((error) => {
+        console.log(error);
+    });
+
 }
 
-function databasePullSSH() {
-  console.log(`Pull database from ${jobConfig.project}:${jobConfig.source}`);
-  const e = projects[jobConfig.project][jobConfig.source];
-  let cmd = `ssh ${e.sshUsername}@${e.sshHost} -o StrictHostKeyChecking=no -p ${e.sshPort} "mysqldump -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName}" > ./tmp/dump.sql`;
-  let stdout = execSync(cmd);
+function databasePull(project) {
+  console.log(`Pull database from ${project.remote.dbHost}`);
+  let cmd = `mysqldump --column-statistics=0 -u${project.remote.dbUsername} -p${project.remote.dbPassword} --port=${project.remote.dbPort} -h${project.remote.dbHost} ${project.remote.dbName} > ./tmp/dump.sql`;
+  let stdout = execSync(cmd, {stdio: "ignore"});
+}
+
+function databasePullSSH(project) {
+    try {
+        console.log(`Pull database via SSH from host ${project.remote.sshHost} from database host ${project.remote.dbHost}`);
+        let cmd = `ssh ${project.remote.sshUsername}@${project.remote.sshHost} -o StrictHostKeyChecking=no -p ${project.remote.sshPort} "mysqldump -u${project.remote.dbUsername} -p${project.remote.dbPassword} --port=${project.remote.dbPort} -h${project.remote.dbHost} ${project.remote.dbName}" > ./tmp/dump.sql`;
+        let stdout = execSync(cmd, {stdio: "ignore"});
+    } catch(e) {
+        console.log(e);
+    }
+
+}
+
+function databasePushMySQL(project) {
+  console.log(`Push database to ${project.local.dbHost}`);
+  let cmd = `mysql -u${project.local.dbUsername} -p${project.local.dbPassword} --port=${project.local.dbPort} -h${project.local.dbHost} ${project.local.dbName} < ./tmp/dump.sql`;
+  let stdout = execSync(cmd, {stdio: "ignore"});
   // console.log(stdout.toString());
 }
 
-function databasePushMySQL() {
-  console.log(`Push database to ${jobConfig.project}:${jobConfig.destination}`);
-  const e = projects[jobConfig.project][jobConfig.destination];
+function databaseReplaceMySQL(project) {
 
-  // Skip read only target.
-  if (e.readonly) {
-    console.log("Target is read only. Skip push.");
-    return false;
-  }
+    return new Promise((resolve, reject) => {
 
-  let cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} < ./tmp/dump.sql`;
-  let stdout = execSync(cmd);
-  // console.log(stdout.toString());
-}
 
-function databaseReplaceMySQL() {
-  console.log("Replace domains.");
-  const eSource = projects[jobConfig.project][jobConfig.source];
-  const e = projects[jobConfig.project][jobConfig.destination];
+        console.log("Replace domains.");
 
-  // Skip read only target.
-  if (e.readonly) {
-    console.log("Target is read only. Skip replacements.");
-    return false;
-  }
+        // Domain replacements.
+        const commands = [
+            `mysql  -u${project.local.dbUsername} \
+                -p${project.local.dbPassword} \
+                --port=${project.local.dbPort} \
+                -h${project.local.dbHost} ${project.local.dbName} \
+                -e "UPDATE  ${project.local.dbPrefix}options \
+                    SET     option_value = replace(option_value, '${project.remote.url}', '${project.local.url}') \
+                    WHERE   option_name = 'home' OR option_name = 'siteurl'"`,
+            `mysql  -u${project.local.dbUsername} \
+                -p${project.local.dbPassword} \
+                --port=${project.local.dbPort} \
+                -h${project.local.dbHost} ${project.local.dbName} \
+                -e "UPDATE  ${project.local.dbPrefix}posts \
+                    SET     guid = replace(guid, '${project.remote.url}', '${project.local.url}')"`,
+            `mysql  -u${project.local.dbUsername} \
+                -p${project.local.dbPassword} \
+                --port=${project.local.dbPort} \
+                -h${project.local.dbHost} ${project.local.dbName} \
+                -e "UPDATE  ${project.local.dbPrefix}posts \
+                    SET post_content = replace(post_content, '${project.remote.url}', '${project.local.url}')"`,
+            `mysql  -u${project.local.dbUsername} \
+                -p${project.local.dbPassword} \
+                --port=${project.local.dbPort} \
+                -h${project.local.dbHost} ${project.local.dbName} \
+                -e "UPDATE  ${project.local.dbPrefix}postmeta \
+                    SET     meta_value = replace(meta_value, '${project.remote.url}', '${project.local.url}')"`
+        ];
 
-  let cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} -e "UPDATE ${e.dbPrefix}options SET option_value = replace(option_value, '${eSource.url}', '${e.url}') WHERE option_name = 'home' OR option_name = 'siteurl'"`;
-  let stdout = execSync(cmd);
-  // console.log(stdout.toString());
+        // Execute commands.
+        exec(commands.join(" && "), (err, stdout, stderr) => {
+            if (err) {
+                reject(stderr);
+            } else {
+                resolve();
+            }
+        });
+    });
 
-  cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} -e "UPDATE ${e.dbPrefix}posts SET guid = replace(guid, '${eSource.url}', '${e.url}')"`;
-  stdout = execSync(cmd);
-  // console.log(stdout.toString());
-
-  cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} -e "UPDATE ${e.dbPrefix}posts SET post_content = replace(post_content, '${eSource.url}', '${e.url}')"`;
-  stdout = execSync(cmd);
-  // console.log(stdout.toString());
-
-  cmd = `mysql -u${e.dbUsername} -p${e.dbPassword} --port=${e.dbPort} -h${e.dbHost} ${e.dbName} -e "UPDATE ${e.dbPrefix}postmeta SET meta_value = replace(meta_value, '${eSource.url}', '${e.url}')"`;
-  stdout = execSync(cmd);
-  // console.log(stdout.toString());
 }
 
 /**
@@ -116,52 +157,29 @@ function promptProject() {
       }
     ])
     .then(function(answers) {
-      Object.assign(jobConfig, answers);
-      promptSourceEnvironment();
+        const project = projects[answers.project];
+      promptPull(project);
     });
 }
 
-/**
- * A second UI step. Ask for source environment.
- */
-function promptSourceEnvironment() {
-  inquirer
-    .prompt([
-      {
-        type: "list",
-        name: "source",
-        message: "Select source environment",
-        choices: Object.keys(projects[jobConfig.project])
-      }
-    ])
-    .then(function(answers) {
-      Object.assign(jobConfig, answers);
-      promptTargetEnvironment();
-    });
-}
 
 /**
- * A third UI step. Ask for destination environment.
+ * Confirm before continuing.
  */
-function promptTargetEnvironment() {
-  // Filter out source environment. Target can't be the same as source.
-  const availableEnvironments = Object.keys(projects[jobConfig.project]).filter(
-    environment => environment != jobConfig.from
-  );
+function promptPull(project) {
 
   inquirer
     .prompt([
       {
-        type: "list",
-        name: "destination",
-        message: "Select destination environment",
-        choices: availableEnvironments
+        type: "confirm",
+        name: "confirm",
+        message: "Pull from remote to local datanase and overwrite existing content?",
       }
     ])
     .then(function(answers) {
-      Object.assign(jobConfig, answers);
-      // console.log(jobConfig);
-      doSync();
+        if (answers.confirm) {
+            doPull(project);
+        }
     });
 }
 
